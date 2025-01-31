@@ -1,42 +1,40 @@
-name: Setup Public VPN
+name: Deploy Public VPN
 
 on:
   workflow_dispatch:
 
 jobs:
-  deploy-vpn:
+  setup-vpn:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Install SSH Client
-        run: sudo apt-get install -y openssh-client
+      - name: Setup SSH Key
+        run: |
+          echo -e "${{ secrets.VPS_SSH_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-      - name: Setup IPSec VPN on VPS
+      - name: Deploy VPN on VPS
         env:
           VPS_IP: ${{ secrets.VPS_IP }}
           VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
-          echo "$VPS_SSH_KEY" > private_key.pem
-          chmod 600 private_key.pem
-
           ssh -o StrictHostKeyChecking=no -i private_key.pem $VPS_USER@$VPS_IP << 'EOF'
-            # Install strongSwan for IPSec VPN
+            # Install required packages
             sudo apt update && sudo apt install -y strongswan xl2tpd ppp iptables
 
-            # Configure IP forwarding
+            # Enable IP forwarding
             echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
             sudo sysctl -p
 
-            # Set up VPN credentials
+            # VPN credentials
             VPN_USER="publicvpn"
             VPN_PASSWORD="public123"
             VPN_PSK="vpnsharedkey"
 
-            # Configure IPSec
+            # Configure strongSwan (IPSec)
             echo "config setup
             conn %default
                 keyexchange=ikev2
@@ -67,12 +65,12 @@ jobs:
 
             echo "$VPN_USER l2tpd \"$VPN_PASSWORD\" *" | sudo tee -a /etc/ppp/chap-secrets
 
-            # Enable services
+            # Restart VPN services
             sudo systemctl restart strongswan
             sudo systemctl enable strongswan
 
-            # Output VPN Configuration
-            echo "### VPN Connection Details ###"
+            # Display VPN Configuration
+            echo "### VPN Configuration ###"
             echo "Server: $VPS_IP"
             echo "Username: $VPN_USER"
             echo "Password: $VPN_PASSWORD"
