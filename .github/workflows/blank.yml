@@ -1,4 +1,4 @@
-name: Setup WireGuard VPN
+name: Setup Public VPN
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
       - name: Install SSH Client
         run: sudo apt-get install -y openssh-client
 
-      - name: Setup WireGuard VPN on VPS
+      - name: Setup IPSec VPN on VPS
         env:
           VPS_IP: ${{ secrets.VPS_IP }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -24,47 +24,58 @@ jobs:
           chmod 600 private_key.pem
 
           ssh -o StrictHostKeyChecking=no -i private_key.pem $VPS_USER@$VPS_IP << 'EOF'
-            # Install WireGuard
-            sudo apt update && sudo apt install -y wireguard
+            # Install strongSwan for IPSec VPN
+            sudo apt update && sudo apt install -y strongswan xl2tpd ppp iptables
 
-            # Generate server keys
-            SERVER_PRIVATE_KEY=$(wg genkey)
-            SERVER_PUBLIC_KEY=$(echo "$SERVER_PRIVATE_KEY" | wg pubkey)
+            # Configure IP forwarding
+            echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+            sudo sysctl -p
 
-            # Generate client keys
-            CLIENT_PRIVATE_KEY=$(wg genkey)
-            CLIENT_PUBLIC_KEY=$(echo "$CLIENT_PRIVATE_KEY" | wg pubkey)
+            # Set up VPN credentials
+            VPN_USER="publicvpn"
+            VPN_PASSWORD="public123"
+            VPN_PSK="vpnsharedkey"
 
-            # Configure WireGuard Server
-            echo "[Interface]
-            PrivateKey = $SERVER_PRIVATE_KEY
-            Address = 10.0.0.1/24
-            ListenPort = 51820
-            PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-            PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-            " | sudo tee /etc/wireguard/wg0.conf
+            # Configure IPSec
+            echo "config setup
+            conn %default
+                keyexchange=ikev2
+                ike=aes256-sha2_256-modp2048!
+                esp=aes256-sha2_256!
+                dpdaction=clear
+                dpddelay=300s
+                rekey=no
 
-            echo "[Peer]
-            PublicKey = $CLIENT_PUBLIC_KEY
-            AllowedIPs = 10.0.0.2/32
-            " | sudo tee -a /etc/wireguard/wg0.conf
+            conn L2TP-PSK
+                keyexchange=ikev1
+                authby=secret
+                ike=aes256-sha1-modp1024!
+                esp=aes256-sha1!
+                dpddelay=30
+                dpdtimeout=120
+                rekey=no
+                left=%any
+                leftid=$VPS_IP
+                leftsubnet=0.0.0.0/0
+                right=%any
+                rightid=%any
+                rightsubnet=0.0.0.0/0
+                auto=add
+            " | sudo tee /etc/ipsec.conf
 
-            sudo wg-quick up wg0
-            sudo systemctl enable wg-quick@wg0
+            echo ": PSK \"$VPN_PSK\"" | sudo tee /etc/ipsec.secrets
 
-            # Generate Client Configuration
-            echo "[Interface]
-            PrivateKey = $CLIENT_PRIVATE_KEY
-            Address = 10.0.0.2/24
-            DNS = 8.8.8.8
+            echo "$VPN_USER l2tpd \"$VPN_PASSWORD\" *" | sudo tee -a /etc/ppp/chap-secrets
 
-            [Peer]
-            PublicKey = $SERVER_PUBLIC_KEY
-            Endpoint = $VPS_IP:51820
-            AllowedIPs = 0.0.0.0/0, ::/0
-            PersistentKeepalive = 25
-            " > client.conf
+            # Enable services
+            sudo systemctl restart strongswan
+            sudo systemctl enable strongswan
 
-            echo "VPN Configuration:"
-            cat client.conf
+            # Output VPN Configuration
+            echo "### VPN Connection Details ###"
+            echo "Server: $VPS_IP"
+            echo "Username: $VPN_USER"
+            echo "Password: $VPN_PASSWORD"
+            echo "Pre-Shared Key: $VPN_PSK"
+            echo "VPN Type: L2TP/IPSec PSK"
           EOF
