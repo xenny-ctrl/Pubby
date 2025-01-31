@@ -1,0 +1,70 @@
+name: Setup WireGuard VPN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-vpn:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install SSH Client
+        run: sudo apt-get install -y openssh-client
+
+      - name: Setup WireGuard VPN on VPS
+        env:
+          VPS_IP: ${{ secrets.VPS_IP }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          echo "$VPS_SSH_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          ssh -o StrictHostKeyChecking=no -i private_key.pem $VPS_USER@$VPS_IP << 'EOF'
+            # Install WireGuard
+            sudo apt update && sudo apt install -y wireguard
+
+            # Generate server keys
+            SERVER_PRIVATE_KEY=$(wg genkey)
+            SERVER_PUBLIC_KEY=$(echo "$SERVER_PRIVATE_KEY" | wg pubkey)
+
+            # Generate client keys
+            CLIENT_PRIVATE_KEY=$(wg genkey)
+            CLIENT_PUBLIC_KEY=$(echo "$CLIENT_PRIVATE_KEY" | wg pubkey)
+
+            # Configure WireGuard Server
+            echo "[Interface]
+            PrivateKey = $SERVER_PRIVATE_KEY
+            Address = 10.0.0.1/24
+            ListenPort = 51820
+            PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+            " | sudo tee /etc/wireguard/wg0.conf
+
+            echo "[Peer]
+            PublicKey = $CLIENT_PUBLIC_KEY
+            AllowedIPs = 10.0.0.2/32
+            " | sudo tee -a /etc/wireguard/wg0.conf
+
+            sudo wg-quick up wg0
+            sudo systemctl enable wg-quick@wg0
+
+            # Generate Client Configuration
+            echo "[Interface]
+            PrivateKey = $CLIENT_PRIVATE_KEY
+            Address = 10.0.0.2/24
+            DNS = 8.8.8.8
+
+            [Peer]
+            PublicKey = $SERVER_PUBLIC_KEY
+            Endpoint = $VPS_IP:51820
+            AllowedIPs = 0.0.0.0/0, ::/0
+            PersistentKeepalive = 25
+            " > client.conf
+
+            echo "VPN Configuration:"
+            cat client.conf
+          EOF
